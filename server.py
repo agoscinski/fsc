@@ -9,7 +9,6 @@ import MySQLdb
 from enum import Enum
 import matching_algorithm
 import TradingClass
-import utils
 from TradingClass import MarketDataResponse
 from TradingClass import NewSingleOrder
 from TradingClass import OrderCancelRequest
@@ -25,8 +24,6 @@ class ServerRespond(Enum):
 
 
 class ServerFIXApplication(fix.Application):
-    exec_id = 0
-    order_id = 0
 
     def __init__(self, server_fix_handler):
         self.server_fix_handler = server_fix_handler
@@ -97,26 +94,10 @@ class ServerFIXApplication(fix.Application):
             print '''IN OrderCancelRequest'''
             self.server_fix_handler.handle_order_cancel_request(message)
 
-    def gen_exec_id(self):
-        self.exec_id = self.exec_id + 1
-        return self.exec_id
-
-    def gen_order_id(self):
-        self.order_id = self.order_id + 1
-        return self.order_id
-
-
 class ServerFIXHandler:
-    def __init__(self, server_logic):
-        """
-        Args:
-            server_logic (ServerLogic)
-        """
+    def __init__(self, server_logic, server_config_file_name):
         self.server_logic = server_logic
-        server_configuration_handler = utils.ServerConfigFileHandler(application_id=self.server_logic.application_id,
-                                                                     start_time=str(self.server_logic.start_time),
-                                                                     end_time=str(self.server_logic.end_time))
-        self.server_config_file_name = server_configuration_handler.create_config_file(self.server_logic.server_database_handler)
+        self.server_config_file_name = server_config_file_name
         self.fix_application = None
         self.socket_acceptor = None
 
@@ -256,7 +237,6 @@ class ServerFIXHandler:
         message = fix.Message()
         header = message.getHeader()
         header.setField(fix.MsgType(fix.MsgType_ExecutionReport))
-        header.setField(fix.MsgSeqNum(self.fix_application.exec_id))
         header.setField(fix.SendingTime())
 
         message.setField(fix.OrderID(order_cancel_execution.order_id))
@@ -295,39 +275,38 @@ class ServerFIXHandler:
 
 
 class ServerLogic:
-    """
-    Attributes:
-        application_id (string): used to identify the server and used for creation for the config file
-        start_time (datetime.time): the starting time for trading
-        end_time (datetime.time): the ending time for trading
-        server_database_handler (ServerDatabaseHandler)
-        current_server_time (datetime.time): current time of the server
-        server_fix_handler
-    """
-    def __init__(self, application_id, server_database_handler=None):
-        self.application_id = application_id
-        self.start_time = datetime.datetime.strptime("08:00:00", "%H:%M:%S").time()
-        self.end_time = datetime.datetime.strptime("17:00:00", "%H:%M:%S").time()
-        if server_database_handler is None:
-            self.server_database_handler = ServerDatabaseHandler(user_name="root", user_password="root",
-                                                database_name="ServerDatabase", database_port=3306,
-                                                init_database_script_path="./database/server/init_server_database.sql")
-        else:
-            self.server_database_handler = server_database_handler
-        self.server_database_handler.init_database()
-        self.server_fix_handler = ServerFIXHandler(self)
+    exec_id = 0
+    order_id = 0
+    cancel_order_id = 0
 
-    @property
-    def current_server_time(self):
-        return datetime.datetime.utcnow()
+    def __init__(self, server_config_file_name, server_database_handler=None):
+        self.server_fix_handler = ServerFIXHandler(self, server_config_file_name)
+        self.server_database_handler = ServerDatabaseHandler() if server_database_handler == None else server_database_handler
+        self.market_simulation_handler = MarketSimulationHandler()
+        self.initialize_new_database = False
 
     def start_server(self):
+        if self.initialize_new_database:
+            self.server_database_handler.create_database()
+            self.market_simulation_handler.init_market()
         self.server_fix_handler.start()
         while 1: time.sleep(1)
         self.stop_server()
 
     def stop_server(self):
         self.server_fix_handler.stop()
+
+    def gen_exec_id(self):
+        self.exec_id = self.exec_id + 1
+        return self.exec_id
+
+    def gen_order_id(self):
+        self.order_id = self.order_id + 1
+        return self.order_id
+
+    def gen_order_cancel_id(self):
+        self.cancel_order_id = self.cancel_order_id + 1
+        return self.cancel_order_id
 
     def authenticate_user(self, user_id, password):
         """Authenticates user
@@ -422,13 +401,13 @@ class ServerLogic:
         return None
 
     def process_invalid_order_request(self, requested_order):
-        order_id = str(self.server_fix_handler.fix_application.gen_order_id())
-        exec_id = str(self.server_fix_handler.fix_application.gen_exec_id())
+        order_id = str(self.gen_order_id())
+        exec_id = str(self.gen_exec_id())
         cl_ord_id = requested_order.client_order_id
         receiver_comp_id = requested_order.account_company_id
-        exec_trans_type = '8' ##TODO Husein use TradingClass.FIXHandlerUtils now; example here should be: TradingClass.FIXHandlerUtils.ExecutionTransactionType.REJECTED
-        exec_type = '8' #TODO Husein use TradingClass.FIXHandlerUtils now
-        ord_status = '8' #TODO Husein use TradingClass.FIXHandlerUtils now
+        exec_trans_type = TradingClass.FIXHandlerUtils.ExecutionTransactionType.NEW
+        exec_type = TradingClass.FIXHandlerUtils.ExecutionType.REJECTED
+        ord_status = TradingClass.FIXHandlerUtils.OrderStatus.REJECTED
         symbol = requested_order.stock_ticker
         side = requested_order.side
         price = requested_order.price
@@ -445,6 +424,10 @@ class ServerLogic:
         self.server_fix_handler.send_reject_order_execution_respond(reject_order_execution)
 
     def check_if_order_is_valid(self, requested_order):
+
+        if(self.current_server_time>=self.end_time or self.current_server_time<=self.start_time):
+            return False
+
         stock_total_volume = self.server_database_handler.fetch_stock_total_volume(requested_order.stock_ticker)
         stock_information = self.server_database_handler.fetch_stock_information(requested_order.stock_ticker)
         current_price = stock_information.current_price
@@ -456,8 +439,15 @@ class ServerLogic:
         return is_valid
 
     def process_invalid_order_cancel_request(self, requested_order_cancel):
-        #TODO Husein write documentation
-        order_id = str(self.server_fix_handler.fix_application.gen_order_id())
+        """Process an invalid order cancel request and create OrderCancelReject Fix object to be sent through FixHandler
+
+        Args:
+            requested_order_cancel (OrderCancel): OrderCancel Object created from OrderCancelRequest Fix object
+
+        Returns:
+            None
+        """
+        order_id = str(self.gen_order_cancel_id())
         cl_ord_id = requested_order_cancel.order_cancel_id
         orig_cl_ord_id = requested_order_cancel.client_order_id
         receiver_comp_id = requested_order_cancel.account_company_id
@@ -469,10 +459,18 @@ class ServerLogic:
         self.server_fix_handler.send_order_cancel_reject_respond(order_cancel_reject)
 
     def process_order_cancel_request(self, order_cancel_request):
-        #TODO Husein write documentation
+        """Process an invalid order cancel request from Fix Handler
+
+        Args:
+            order_cancel_request (OrderCancelRequest): OrderCancelRequest Object from fix handler
+
+        Returns:
+            None
+        """
         requested_order_cancel = TradingClass.OrderCancel.from_order_cancel_request(order_cancel_request)
         order = self.server_database_handler.fetch_latest_order_by_client_information(
             requested_order_cancel.client_order_id, requested_order_cancel.account_company_id)
+        requested_order_cancel.order_received_date = order.received_date
         order_cancel_is_valid = self.check_if_order_cancel_is_valid(order)
         if order_cancel_is_valid:
             self.process_valid_order_cancel_request(requested_order_cancel, order)
@@ -480,33 +478,52 @@ class ServerLogic:
             self.process_invalid_order_cancel_request(requested_order_cancel)
 
     def check_if_order_cancel_is_valid(self, order):
-        #TODO Husein write documentation
+        """Check whether an order cancel request is valid or not valid based on status of Order Object
+
+        Args:
+            order (Order): Order object created based on OrderCancel object
+
+        Returns:
+            True or False
+        """
         if order is None:
             return False
-        elif (order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.DONE or order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.CANCELED
+        elif (order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.DONE or
+                      order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.CANCELED
             or order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.EXPIRED):
             return False
         else:
             return True
 
     def process_valid_order_cancel_request(self, requested_order_cancel, order):
-        #TODO Husein write documentation of function
+        """Process a valid order cancel request and create ExecutionReport Fix object to be sent through FixHandler
+
+        Args:
+            requested_order_cancel (OrderCancel): OrderCancel object created based on OrderCancelRequest Fix object
+            order (Order): Order object based on OrderCancel object
+
+        Returns:
+            None
+        """
         self.server_database_handler.update_order_status(order, TradingClass.DatabaseHandlerUtils.LastStatus.CANCELED)
         cumulative_quantity, average_price = self.server_database_handler.fetch_cumulative_quantity_and_average_price_by_order_id(
             order.client_order_id, order.account_company_id, order.received_date)
-        cancel_quantity = order.price-cumulative_quantity
-        self.server_database_handler.insert_order_cancel(requested_order_cancel, order, cancel_quantity)
+        requested_order_cancel.cancel_quantity = order.price-cumulative_quantity
+        requested_order_cancel.last_status = TradingClass.DatabaseHandlerUtils.LastStatus.CANCELED
+        requested_order_cancel.msg_seq_num = self.gen_order_cancel_id()
+
+        self.server_database_handler.insert_order_cancel(requested_order_cancel)
         # self.server_database_handler.update_order_cancel_success(requested_order_cancel.client_order_id,
         #        requested_order_cancel.account_company_id, OrderCancelStatus.CANCELED, cumulative_quantity, executed_time)
 
-        order_id = str(self.server_fix_handler.fix_application.gen_order_id())
+        order_id = str(self.gen_order_cancel_id())
         orig_cl_ord_id = requested_order_cancel.client_order_id
         cl_ord_id = requested_order_cancel.order_cancel_id
-        exec_id = str(self.server_fix_handler.fix_application.gen_exec_id())
+        exec_id = str(self.gen_exec_id())
         receiver_comp_id = requested_order_cancel.account_company_id
-        exec_trans_type = '1' #TODO Husein use TradingClass.FIXHandlerUtils now
-        exec_type = '4' #TODO Husein use TradingClass.FIXHandlerUtils now
-        ord_status = '4' #TODO Husein use TradingClass.FIXHandlerUtils now
+        exec_trans_type =  TradingClass.FIXHandlerUtils.ExecutionTransactionType.NEW
+        exec_type = TradingClass.FIXHandlerUtils.ExecutionType.CANCELED
+        ord_status = TradingClass.FIXHandlerUtils.OrderStatus.CANCELED
         symbol = requested_order_cancel.stock_ticker
         side = requested_order_cancel.side
         price = None
@@ -810,21 +827,35 @@ class ServerDatabaseHandler(TradingClass.DatabaseHandler):
 
 
 
-    def insert_order_cancel(self, requested_order_cancel, order, cancel_quantity):
-        #TODO Husein write documentation
+    def insert_order_cancel(self, requested_order_cancel):
+        """Inserts a TradingClass.OrderCancel into the database
+
+        Args:
+            requested_order_cancel (TradingClass.OrderCancel): The order cancel to be inserted
+        Returns:
+            None
+        """
         last_status=0
         executed_time = FIXDateTimeUTC.create_for_current_time()
         sql_command = ("INSERT INTO OrderCancel(Order_ClientOrderID, OrderCancelID, Order_Account_CompanyID, " \
                       "Order_ReceivedDate, LastStatus, ReceivedTime, MsgSeqNum, CancelQuantity, ExecutionTime) " \
                       "VALUES('%s','%s','%s','%s','%s','%s','%s','%s','%s')"%(requested_order_cancel.client_order_id,
-            requested_order_cancel.order_cancel_id,requested_order_cancel.account_company_id,order.received_date,
-            last_status, requested_order_cancel.received_time.date_time, requested_order_cancel.msg_seq_num,cancel_quantity,
-            executed_time.date_time))
+            requested_order_cancel.order_cancel_id,requested_order_cancel.account_company_id,
+            requested_order_cancel.order_received_date, last_status, requested_order_cancel.received_time.date_time,
+            requested_order_cancel.msg_seq_num,requested_order_cancel.cancel_quantity, executed_time.date_time))
         self.execute_nonresponsive_sql_command(sql_command)
 
     def update_order_status(self, order, order_status):
-        #TODO Husein write documentation
-        sql_command = ("UPDATE `Order` SET LastStatus ='%s' where ClientOrderID='%s' AND Account_CompanyID='%s' AND ReceivedDate ='%s'"
+        """Update TradingClass.Order status into database
+
+        Args:
+            order (TradingClass.Order): The order to be updated in status
+            order_status (TradingClass.DatabaseHandlerUtils.LastStatus) : status of order to be updated
+        Returns:
+            None
+        """
+        sql_command = ("UPDATE `Order` SET LastStatus ='%s' where ClientOrderID='%s' AND Account_CompanyID='%s' "
+                       "AND ReceivedDate ='%s'"
                        % (order_status, order.client_order_id, order.account_company_id, order.received_date))
         self.execute_nonresponsive_sql_command(sql_command)
 

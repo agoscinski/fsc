@@ -1,11 +1,15 @@
 import server
+import datetime
 import TradingClass
 
+nasdaq_stock_ticker = "TESTTICKER"
+nasdaq_stock = server.Stock(nasdaq_stock_ticker)
+
 fsc_server_database_handler = server.ServerDatabaseHandler(user_name="root", user_password="root",
-                                                           database_name="TestServerDatabase", database_port=3306,
-                                                           init_database_script_path="./tests/database/server/init_test_server_database.sql")
-server_application_id = "test"
-fsc_server_logic = server.ServerLogic(server_application_id, fsc_server_database_handler)
+                                                           database_name="TestFSCDatabase", database_port=3306,
+                                                           init_database_script_path="./tests/database/init_test_database.sql")
+server_config_file_name = "server.cfg"
+fsc_server_logic = server.ServerLogic(server_config_file_name, fsc_server_database_handler)
 
 
 def setup_module(module):
@@ -43,16 +47,66 @@ class TestServerLogic:
 
     def test_process_valid_order_cancel_request(self):
         # TODO Husein
+        order_cancel= TradingClass.OrderCancel.create_dummy_order_cancel()
+        order =fsc_server_database_handler.fetch_latest_order_by_client_information(
+            order_cancel.client_order_id, order_cancel.account_company_id)
+        fsc_server_logic.process_valid_order_cancel_request(order_cancel,order)
+
+        order = fsc_server_database_handler.fetch_latest_order_by_client_information(
+            order_cancel.client_order_id, order_cancel.account_company_id)
+        assert order.last_status == TradingClass.DatabaseHandlerUtils.LastStatus.CANCELED
+
+        sql_command = ("select Order_ClientOrderID, OrderCancelID, Order_Account_CompanyID, Order_ReceivedDate, "
+                       "stock??, Side, order_quantity??, LastStatus, received_time??, MsgSeqNum, "
+                       "CancelQuantity, ExecutionTime from OrderCancel"
+                       " where OrderCancelID='%s'") % (order_cancel.order_cancel_id)
+        stock_ticker = None
+        order_quantity = None
+        received_time = None
+
+        order_cancel_rows = self.execute_select_sql_command(sql_command)
+        if len(order_cancel_rows) < 1: return None
+        order_cancel_row = list(order_cancel_rows[0])
+        order_cancel_db = TradingClass.OrderCancel(order_cancel_row[0],order_cancel_row[1],order_cancel_row[2],
+                                                TradingClass.FIXDate.from_mysql_date_stamp_string(order_cancel_row[3]),
+                                                stock_ticker, order_cancel_row[4], order_quantity, order_cancel_row[5], received_time,
+                                                order_cancel_row[6],order_cancel_row[7],
+                                                TradingClass.FIXDateTimeUTC.from_date_fix_time_stamp_string(order_cancel_row[8]))
+
+        assert order_cancel_db.client_order_id == order_cancel.client_order_id
+        assert order_cancel_db.order_cancel_id == order_cancel.order_cancel_id
+        assert order_cancel_db.account_company_id == order_cancel.account_company_id
+        assert order_cancel_db.order_received_date == order_cancel.order_received_date
+        assert order_cancel_db.side == order_cancel.side
+        assert order_cancel_db.last_status == order_cancel.last_status
+        assert order_cancel_db.msg_seq_num == order_cancel.msg_seq_num
+        assert order_cancel_db.cancel_quantity == order_cancel.cancel_quantity
+        assert order_cancel_db.execution_time == order_cancel.execution_time
+        assert order_cancel_db.cancel_quantity == order_cancel.cancel_quantity
+
         pass
 
 
     def test_check_if_order_cancel_is_valid(self):
         # TODO Husein
-        pass
+        order = fsc_server_database_handler.fetch_latest_order_by_client_information('2', 'XX')
+        valid = fsc_server_logic.check_if_order_cancel_is_valid(order)
+        assert valid == False
 
+        order = fsc_server_database_handler.fetch_latest_order_by_client_information('1', 'MS')
+        valid = fsc_server_logic.check_if_order_cancel_is_valid(order)
+        assert valid == False
+
+        order = fsc_server_database_handler.fetch_latest_order_by_client_information('0', 'MS')
+        valid = fsc_server_logic.check_if_order_cancel_is_valid(order)
+        assert valid == True
+
+        pass
 
     def test_process_invalid_order_cancel_request(self):
         # TODO Husein
+        order_cancel= TradingClass.OrderCancel.create_dummy_order_cancel()
+        fsc_server_logic.process_invalid_order_cancel_request(order_cancel)
         pass
 
 class TestServerDatabaseHandler:
